@@ -1,5 +1,7 @@
 streamlit
 pandas
-numpy
+geopandas
 folium
 streamlit-folium
+fiona
+pyogrio
