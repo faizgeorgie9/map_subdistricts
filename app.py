@@ -1,17 +1,16 @@
 import streamlit as st
 import pandas as pd
+import geopandas as gpd
 import folium
 from streamlit_folium import st_folium
 import numpy as np
+from fiona import listlayers
 
 # Konfigurasi Halaman
-st.set_page_config(layout="wide", page_title="Mapping Ekonomi Kecamatan")
+st.set_page_config(layout="wide", page_title="Mapping Ekonomi Kecamatan (Area)")
 
 # --- FUNGSI LOGIKA WARNA & STATUS ---
 def get_status_info(pengeluaran):
-    """
-    Mengembalikan warna dan label status berdasarkan nominal pengeluaran.
-    """
     if pengeluaran < 2500000:
         return 'red', 'Rendah'
     elif 2500000 <= pengeluaran <= 4500000:
@@ -19,97 +18,105 @@ def get_status_info(pengeluaran):
     else:
         return 'green', 'Tinggi'
 
-# --- FUNGSI LOAD DATA ---
+# --- FUNGSI LOAD DATA GPKG ---
 @st.cache_data
-def load_local_data():
-    df_prov = pd.read_csv('data/provinces.csv')
-    df_kota = pd.read_csv('data/cities.csv')
-    df_kec = pd.read_csv('data/kecamatan.csv')
-    
-    for df in [df_prov, df_kota, df_kec]:
-        if 'Code' in df.columns:
-            df['Code'] = df['Code'].astype(str)
-        if 'Parent' in df.columns:
-            df['Parent'] = df['Parent'].astype(str)
-            
-    return df_prov, df_kota, df_kec
+@st.cache_data
+def load_gpkg_data():
+    path = "data/indonesia_simple.gpkg"
+    # Sekarang layer sudah rapi namanya: 'provinsi', 'kota', 'kecamatan'
+    gdf_prov = gpd.read_file(path, layer='provinsi')
+    gdf_city = gpd.read_file(path, layer='kota')
+    gdf_kec = gpd.read_file(path, layer='kecamatan')
+
+    # Pastikan koordinat WGS84
+    for gdf in [gdf_prov, gdf_city, gdf_kec]:
+        if gdf.crs != "EPSG:4326":
+            gdf.to_crs("EPSG:4326", inplace=True)
+    return gdf_prov, gdf_city, gdf_kec
 
 try:
-    df_prov, df_kota, df_kec = load_local_data()
+    gdf_prov, gdf_city, gdf_kec = load_gpkg_data()
 
     # --- SIDEBAR FILTER ---
-    st.sidebar.header("📍 Filter Wilayah")
+    st.sidebar.header("📍 Filter Wilayah (GeoPackage)")
 
-    sel_prov_name = st.sidebar.selectbox("Pilih Provinsi", sorted(df_prov['Name'].unique()))
-    prov_id = df_prov[df_prov['Name'] == sel_prov_name]['Code'].values[0]
+    # 1. Pilih Provinsi
+    # Catatan: Sesuaikan 'NAME_1' dengan nama kolom di file gpkg Anda
+    list_prov = sorted(gdf_prov['NAME_1'].unique())
+    sel_prov_name = st.sidebar.selectbox("Pilih Provinsi", list_prov)
 
-    df_kota_filtered = df_kota[df_kota['Parent'] == prov_id]
-    sel_kota_name = st.sidebar.selectbox("Pilih Kota/Kabupaten", sorted(df_kota_filtered['Name'].unique()))
-    kota_id = df_kota_filtered[df_kota_filtered['Name'] == sel_kota_name]['Code'].values[0]
+    # 2. Filter Kota
+    gdf_city_filtered = gdf_city[gdf_city['NAME_1'] == sel_prov_name]
+    list_city = sorted(gdf_city_filtered['NAME_2'].unique())
+    sel_city_name = st.sidebar.selectbox("Pilih Kota/Kabupaten", list_city)
 
-    df_kec_filtered = df_kec[df_kec['Parent'] == kota_id]
-    sel_kec_names = st.sidebar.multiselect("Pilih Kecamatan", sorted(df_kec_filtered['Name'].unique()), 
-                                           default=sorted(df_kec_filtered['Name'].unique()))
+    # 3. Filter Kecamatan (Multiselect)
+    gdf_kec_filtered = gdf_kec[(gdf_kec['NAME_1'] == sel_prov_name) & 
+                               (gdf_kec['NAME_2'] == sel_city_name)]
+    
+    list_kec = sorted(gdf_kec_filtered['NAME_3'].unique())
+    sel_kec_names = st.sidebar.multiselect("Pilih Kecamatan", list_kec, default=list_kec)
 
-    df_final = df_kec_filtered[df_kec_filtered['Name'].isin(sel_kec_names)].copy()
+    # Data Akhir untuk Mapping
+    gdf_final = gdf_kec_filtered[gdf_kec_filtered['NAME_3'].isin(sel_kec_names)].copy()
 
     # --- SIMULASI DATA EKONOMI & KATEGORISASI ---
-    if not df_final.empty:
+    if not gdf_final.empty:
         np.random.seed(42)
-        df_final['pengeluaran'] = np.random.randint(1500000, 6000000, size=len(df_final))
+        gdf_final['pengeluaran'] = np.random.randint(1500000, 6000000, size=len(gdf_final))
         
-        # Tambah kolom Status untuk Tabel
-        # Menggunakan .apply untuk memetakan fungsi get_status_info ke kolom baru
-        df_final['Status'] = df_final['pengeluaran'].apply(lambda x: get_status_info(x)[1])
+        # Tambahkan kolom status
+        gdf_final['Status'] = gdf_final['pengeluaran'].apply(lambda x: get_status_info(x)[1])
 
     # --- TAMPILAN UTAMA ---
-    st.title("📊 Indonesia Economic Mapping")
+    st.title("📊 Indonesia Economic Area Mapping")
     
     st.markdown("""
-    **Keterangan Kategori:** <span style='color:red'>●</span> **Rendah** (< 2.5jt) | 
-    <span style='color:orange'>●</span> **Menengah** (2.5jt - 4.5jt) | 
-    <span style='color:green'>●</span> **Tinggi** (> 4.5jt)
+    **Keterangan Warna Area:** <span style='color:red'>■</span> **Rendah** | 
+    <span style='color:orange'>■</span> **Menengah** | 
+    <span style='color:green'>■</span> **Tinggi**
     """, unsafe_allow_html=True)
 
-    if not df_final.empty:
+    if not gdf_final.empty:
         # Metrics
         col1, col2, col3 = st.columns(3)
-        col1.metric("Kecamatan", len(df_final))
-        col2.metric("Rata-rata", f"Rp {df_final['pengeluaran'].mean():,.0f}")
-        col3.metric("Tertinggi", f"Rp {df_final['pengeluaran'].max():,.0f}")
+        col1.metric("Kecamatan", len(gdf_final))
+        col2.metric("Rata-rata", f"Rp {gdf_final['pengeluaran'].mean():,.0f}")
+        col3.metric("Tertinggi", f"Rp {gdf_final['pengeluaran'].max():,.0f}")
 
-        # Map
-        m = folium.Map(location=[df_final['Latitude'].mean(), df_final['Longitude'].mean()], 
+        # Map Area (Bukan Titik)
+        # Menentukan center peta dari centroid poligon yang dipilih
+        m = folium.Map(location=[gdf_final.geometry.centroid.y.mean(), 
+                                 gdf_final.geometry.centroid.x.mean()], 
                        zoom_start=11)
 
-        for _, row in df_final.iterrows():
-            warna, status_label = get_status_info(row['pengeluaran'])
-            
-            tooltip_html = f"<b>{row['Name']}</b>"
-            popup_html = f"""
-                <div style='width:200px'>
-                <b>Kecamatan:</b> {row['Name']}<br>
-                <b>Pengeluaran:</b> Rp {row['pengeluaran']:,.0f}<br>
-                <hr>
-                <b>Status:</b> {status_label}
-                </div>
-            """
+        # Implementasi Mapping Warna ke Poligon
+        def style_function(feature):
+            pengeluaran = feature['properties'].get('pengeluaran', 0)
+            warna, _ = get_status_info(pengeluaran)
+            return {
+                'fillColor': warna,
+                'color': 'white', # warna garis batas
+                'weight': 1,
+                'fillOpacity': 0.7,
+            }
 
-            folium.Marker(
-                location=[row['Latitude'], row['Longitude']],
-                popup=folium.Popup(popup_html, max_width=300),
-                tooltip=tooltip_html,
-                icon=folium.Icon(color=warna, icon="info-sign")
-            ).add_to(m)
+        folium.GeoJson(
+            gdf_final,
+            style_function=style_function,
+            tooltip=folium.GeoJsonTooltip(
+                fields=['NAME_3', 'pengeluaran', 'Status'],
+                aliases=['Kecamatan:', 'Pengeluaran (Rp):', 'Kategori:'],
+                localize=True
+            )
+        ).add_to(m)
 
-        st_folium(m, width=1200, height=500)
+        st_folium(m, width=1200, height=550)
 
         # --- TABEL DENGAN KOLOM STATUS ---
         st.write("### 📋 Detail Data Kecamatan")
-        # Menampilkan kolom Name, Pengeluaran, dan Status
-        df_display = df_final[['Name', 'pengeluaran', 'Status']].sort_values(by='pengeluaran', ascending=False)
-        
-        # Penamaan kolom agar lebih rapi di Streamlit
+        # NAME_3 biasanya adalah nama kecamatan di file GPKG
+        df_display = pd.DataFrame(gdf_final[['NAME_3', 'pengeluaran', 'Status']].sort_values(by='pengeluaran', ascending=False))
         df_display.columns = ['Nama Kecamatan', 'Pengeluaran (Rp)', 'Kategori']
         
         st.dataframe(df_display, use_container_width=True)
@@ -119,3 +126,4 @@ try:
 
 except Exception as e:
     st.error(f"Terjadi kesalahan: {e}")
+    st.info("Pastikan nama kolom di GPKG (NAME_1, NAME_2, NAME_3) sudah sesuai.")
